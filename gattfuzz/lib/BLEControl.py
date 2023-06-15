@@ -1,10 +1,28 @@
-from cgitb import enable
-from bluepy import btle
-from bluepy.btle import Peripheral,UUID,DefaultDelegate,Scanner
-from bluepy.btle import BTLEException
-
+import re
+import time
 from gattfuzz.lib.Logger import Logger
 logger = Logger(loggername='Gatt_Write').get_logger()
+
+
+import platform
+if platform.system() == "Linux":
+    from bluepy import btle
+    from bluepy.btle import Peripheral, UUID, DefaultDelegate, Scanner
+    from bluepy.btle import BTLEException
+
+    class ReceiveDelegate(DefaultDelegate):
+        def __init__(self):
+            super().__init__()
+        
+        def handleNotification(self, cHandle, data):
+            logger.error("Recevied handle: {}  nofity  ----> {} ".format(str(cHandle), str(data)))
+
+
+elif platform.system() == "Darwin":
+    import asyncio
+    from bleak import BleakClient, BleakScanner, BleakError
+
+
 
 '''
 connect to target device
@@ -12,15 +30,6 @@ connect to target device
 #TODO 监听所有notification接口，所有indications属性
 
 '''
-
-class ReceiveDelegate(DefaultDelegate):
-    def __init__(self):
-        super().__init__()
-    
-    def handleNotification(self, cHandle, data):
-        logger.error("Recevied handle: {}  nofity  ----> {} ".format(str(cHandle), str(data)))
-
-
 
 class BLEControl():
 
@@ -35,7 +44,7 @@ class BLEControl():
     # connect to target mac
     def tar_con(self):
         logger = self.logger
-        logger.info("Begin sacn")
+        logger.info("Begin scan")
         n = 1
         scanner = Scanner()
         devices = scanner.scan(timeout=10)
@@ -335,6 +344,225 @@ class BLEControl():
     #         print("write:" + str(val) +"      to:" + str(hand) )
     #     except BTLEException  as ex:
     #         print(ex)
+
+
+class BLEControlForMac():
+    def __init__(self, uuid='', custom_logger=None):
+        self._conn = None
+        self.target_uuid = uuid
+        if custom_logger:
+            self.logger = custom_logger
+        else:
+            self.logger = logger
+
+        self.available_device_dict = {}
+        self.client = None
+        self.wirte_gatt_list = []
+    
+
+    def set_target_uuid(self, uuid):
+        self.__init__()
+        self.target_uuid = uuid
+
+    
+    def get_write_gatts(self):
+        return self.wirte_gatt_list
+    
+
+    async def start_scan_devices(self, show_device=False, no_name_filter=True):
+        logger = self.logger
+        logger.info("begin scan")
+        devices = await BleakScanner.discover(timeout=5, return_adv=True)
+        for ble_device, adverdata in devices.values():
+            if ble_device in self.available_device_dict:
+                continue
+            self.available_device_dict.update({ble_device : adverdata})
+        logger.info("scan finished, {} device(s) found, check following list".format(len(self.available_device_dict.keys())))
+        
+        if show_device:
+            for device, data in self.available_device_dict.items():
+                if no_name_filter and not device.name:
+                    continue
+                print('\n>>>>>>>>>>>>>>>>>>>>>>>>>>')
+                print("[+]        DeviceUuid: ", device.address)
+                print("[+]        DeviceName: ", device.name)
+                # print("[+]     DeviceDetails: ", device.details)
+                print("[+] AdvertisementData: ", data)
+
+        return list(self.available_device_dict.keys())
+    
+
+    def check_target_uuid_format(self):
+        # check uuid format
+        result = re.match('(\w*:){5}\w*', self.target_uuid)
+        if result:
+            return True
+        else:
+            return False
+        
+
+    def get_device_from_cache(self, uuid):
+        for ble_device in self.available_device_dict:
+            if ble_device.address == uuid:
+                return ble_device
+        return None
+    
+
+    async def find_device_rt(self, uuid):
+        device = await BleakScanner.find_device_by_address(uuid)
+        return device
+    
+    
+    async def connect_target(self, show_scan_device=True):
+        # check uuid format first
+        if self.check_target_uuid_format():
+            self.logger.error('{} is mac format which is not supprted, input uuid instead'.format(self.target_uuid))
+            return
+
+        if not self.available_device_dict:
+            await self.start_scan_devices(show_scan_device)
+
+        target_device = self.get_device_from_cache(self.target_uuid)
+        if not target_device:
+            self.logger.info('a deivce with uuid : {} not found in cache, trying to find again'.format(self.target_uuid))
+            target_device = await self.find_device_rt(self.target_uuid)
+            if not target_device:
+                self.logger.error('{} is not available, check input uuid or try again later'.format(self.target_uuid))
+                return
+        
+        max_try = 10
+        for i in range(max_try):
+            self.logger.info('trying to connect {}'.format(self.target_uuid, target_device))
+
+            try:
+                client = BleakClient(target_device)
+                await client.connect()
+                logger.info("connected")
+                self.client = client
+                if client.is_connected:
+                    show_result = await self.show_all_chars(client)
+                    if show_result:
+                        break
+
+            except asyncio.exceptions.CancelledError as e:
+                logger.error('CancelledError')
+                continue
+            except asyncio.TimeoutError as e:
+                logger.error('TimeoutError')
+                continue
+    
+
+    async def disconnect_target(self):
+        if self.client.is_connected:
+            await self.client.disconnect()
+
+
+    async def show_all_chars(self, client:BleakClient):
+        if not client:
+            self.logger.error('disconnected, try again later')
+            return False
+        
+        self.logger.info('show all characteristics of {}'.format(client))
+        
+        for service in client.services:
+            print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
+            print("[+]        Service: ", service)
+            gatt_char_list = service.characteristics
+
+            for gatt_char in gatt_char_list:    
+                gatt_char_service_uuid = gatt_char.service_uuid
+                gatt_char_uuid = gatt_char.uuid
+                gatt_char_props = gatt_char.properties
+                gatt_char_descs = gatt_char.descriptors
+                gatt_char_handle = gatt_char.handle
+
+                print("------")
+                print("    Characteristic: ", gatt_char_uuid)
+                print("        Properties: ", gatt_char_props)
+                print("            handle: ", gatt_char_handle)
+
+                if self.check_gatt_char_writeable(gatt_char):
+                    if gatt_char not in self.wirte_gatt_list:
+                        self.wirte_gatt_list.append(gatt_char) 
+                
+                if self.check_gatt_char_readable(gatt_char):
+                    try:
+                        value = await client.read_gatt_char(gatt_char)
+                        print("             Value: ", value)
+                        print("            charac: ", gatt_char)
+                    except BleakError as e:
+                        self.logger.warning(e)
+                        continue
+                
+                if self.check_gatt_char_notifyable(gatt_char):
+                    try:
+                        self.client.write_gatt_char(gatt_char, b'\x01\x00')
+                    except BleakError as e:
+                        self.logger.warning(e)
+                        continue
+                
+                if self.check_gatt_char_indicatable(gatt_char):
+                    try:
+                        self.client.write_gatt_char(gatt_char, b'\x02\x00')
+                    except BleakError as e:
+                        self.logger.warning(e)
+                        continue
+
+        return True
+    
+
+    def check_gatt_char_writeable(self, gatt_char):
+        gatt_char_props = gatt_char.properties
+        for prop in gatt_char_props:
+            if 'write' in prop:
+                return True
+        return False
+    
+
+    def check_gatt_char_readable(self, gatt_char):
+        gatt_char_props = gatt_char.properties
+        for prop in gatt_char_props:
+            if 'read' in prop:
+                return True
+        return False
+    
+    def check_gatt_char_notifyable(self, gatt_char):
+        gatt_char_props = gatt_char.properties
+        for prop in gatt_char_props:
+            if 'notify' in prop:
+                return True
+        return False
+    
+    def check_gatt_char_indicatable(self, gatt_char):
+        gatt_char_props = gatt_char.properties
+        for prop in gatt_char_props:
+            if 'indicate' in prop:
+                return True
+        return False
+    
+
+    def write_data_to_gatt(self, gatt_char, data):
+        if not isinstance(data, bytes):
+            data = data.encode()
+        try:
+            write_response = self.client.write_gatt_char(gatt_char, data, response=True)
+
+            self.logger.info("Write: {} to: {}  response: {}".format(str(data),str(gatt_char),write_response))
+        except BleakError as e:
+            self.logger.error(e)
+        except Exception as e:
+            self.logger.error(e)
+    
+    
+    def write_to_csv(self, muta_data_dic):
+        for gatt, muta_data_list in muta_data_dic.items():
+            for muda_data in muta_data_list:
+                if self.client.is_connected:
+                    self.logger.info('still in connect')
+                    self.write_data_to_gatt(gatt, muda_data)
+                else:
+                    self.logger.warning('disconnected')
+                    break
 
 
 # tar_mac = "FB:65:D4:C2:BE:5A" 
