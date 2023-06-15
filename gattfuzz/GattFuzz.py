@@ -1,8 +1,10 @@
 from gattfuzz.lib.ValueLCS import ValueLCS
 from gattfuzz.lib.PcapProcessor import PcapProcessor
-from gattfuzz.lib.BLEControl import BLEControl
+from gattfuzz.lib.BLEControl import BLEControl, BLEControlForMac
 from scapy.all import *
 import argparse
+import asyncio
+import platform
 
 from gattfuzz.lib.Logger import Logger
 logger = Logger(loggername='Main').get_logger()
@@ -61,11 +63,23 @@ def fuzz_with_pcap(pcap_path,tar_mac):
 
 def fuzz_without_pcap(tar_mac):
 
-    # just write
-    ble = BLEControl(tar_mac)
-    ble.tar_con()
-    handles = ble.print_char()
-    # print("handles:", handles)
+    if platform.system() == "Linux":
+        # just write
+        ble = BLEControl(tar_mac)
+        ble.tar_con()
+        handles = ble.print_char()
+        # print("handles:", handles)
+    
+    elif platform.system() == "Darwin":
+        ble = BLEControlForMac(tar_mac)
+        asyncio.run(ble.connect_target())
+        handles = ble.get_write_gatts()
+        if not ble.client:
+            return
+    
+    else:
+        logger.error('{} is not support now'.format(platform.system()))
+        return
 
     # 随机变异十次
     n = 0
@@ -76,9 +90,8 @@ def fuzz_without_pcap(tar_mac):
         logger.info("--随机变异结束--")
         # print("after_dic:", after_dic)
         n += 1
-
         time.sleep(10.0)
-        print(ble._conn)
+        # print(ble._conn)
         logger.info("--开始变异结果写入--")
         # ble.tar_con(tar_mac)
         ble.write_to_csv(after_dic)
@@ -103,11 +116,11 @@ def main():
     
     pcap_path = args.file
     target_mac = args.mac
-    # try:
+
     if not pcap_path:
         fuzz_without_pcap(target_mac.lower())
     else:
         fuzz_with_pcap(pcap_path, target_mac.lower())
-    # except Exception as e:
-    #     logger.error('[-] fuzz error : {}'.format(e))
+
+
 
