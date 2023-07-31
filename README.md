@@ -5,7 +5,7 @@ GattFuzz 是一款针对BLE Gatt的模糊测试工具。
 Linux
 
 ### Requirements
-Bluepy、Scapy
+Bluepy、Scapy、bleak（for macos only）
 
 ### 安装与使用
 #### 方法一
